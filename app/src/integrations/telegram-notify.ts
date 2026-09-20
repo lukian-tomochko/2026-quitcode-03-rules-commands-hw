@@ -30,6 +30,15 @@ export const telegramNotify: Integration = {
     const chatId = readEnv("TELEGRAM_CHAT_ID");
     if (!chatId.ok) return chatId;
 
+    // The bot token has to be in the URL — Telegram's Bot API has no header-
+    // based auth. postJson (core/http.ts) logs this url verbatim on a failed
+    // attempt, and that log call is redacted by core/log.ts's existing
+    // bot\d{6,}:[A-Za-z0-9_-]{20,} pattern, which matches Telegram's real
+    // token shape. core/http.ts and core/log.ts are protected
+    // (.claude/rules/do-not-touch.md) — further hardening here (e.g. for a
+    // non-standard token shape) would be a core change, not something to
+    // patch around from this file. See telegram-notify.test.ts for the
+    // regression test that proves this redaction actually happens.
     const url = `https://api.telegram.org/bot${botToken.value}/sendMessage`;
     // retries: 0 — a retry after Telegram already accepted the message but the
     // client saw a transport error would resend it; there's no dedup key.

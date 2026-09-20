@@ -65,4 +65,35 @@ describe("telegram-notify", () => {
       error: "telegram error: chat not found",
     });
   });
+
+  it("не пише токен бота в журнал при помилці", async () => {
+    // Realistically-shaped Telegram token (numeric id : 20+ char secret) —
+    // matches core/log.ts's own bot\d{6,}:[A-Za-z0-9_-]{20,} redact pattern,
+    // which is what actually protects the token since the url (with the
+    // token embedded, per Telegram's API) gets logged by core/http.ts on a
+    // failed attempt. core/http.ts and core/log.ts are protected and out of
+    // scope here — this only verifies the existing protection holds.
+    const realisticToken = "1234567890:FAKEtelegramTestSecretToken1234567890";
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", realisticToken);
+    vi.stubEnv("TELEGRAM_CHAT_ID", "123456");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("network down");
+      }),
+    );
+    const logged: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+      logged.push(String(line));
+    });
+    vi.spyOn(console, "error").mockImplementation((line: unknown) => {
+      logged.push(String(line));
+    });
+
+    await telegramNotify.send(lead);
+
+    const combined = logged.join("\n");
+    expect(combined).not.toContain(realisticToken);
+    expect(combined).toContain("bot<REDACTED>");
+  });
 });

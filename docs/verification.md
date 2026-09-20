@@ -100,12 +100,45 @@
   could otherwise let a later lead's checkpoint skip an earlier, still-failed
   one. Result: 24/24 tests green, `check:rules` now **0** total (fixing
   `state.ts`'s `json-via-parse` as a side effect), `typecheck` clean.
-  Known, deliberately unaddressed limitation: if one integration succeeds for
-  a lead and a later one fails, a retry still re-calls the already-succeeded
-  integration (no per-lead/per-integration delivery ledger or idempotency
-  key). Fixing that needs a state-schema change beyond this bug's scope and
-  isn't part of the incident being reproduced here; flagged, not silently
-  dropped.
+- **Second review round, two more real bugs in the fix above, both fixed:**
+  1. `Lead.createdAt` isn't guaranteed unique — `makeLead` accepts any id/timestamp
+     pair, so two leads can legitimately share one `createdAt`. The per-lead
+     checkpoint from the previous round would let the *first* lead's timestamp
+     become the watermark, then exclude the *second* one forever via the
+     strict `createdAt > lastSyncedAt` filter if a crash landed between them.
+  2. The checkpoint advanced past a lead even when one of its integrations
+     returned `Result` `ok: false` (a normal delivery failure, not a crash) —
+     so a failed lead could be silently, permanently skipped instead of
+     retried, which also contradicts the `Result`-over-exceptions convention.
+
+  Fix: `runSync` now processes `pending` in **groups of equal `createdAt`**
+  (already sorted ascending) instead of one lead at a time, and only advances
+  `lastSyncedAt`/calls `saveState` once **every** lead in a group has had
+  **every** integration succeed. A failure anywhere in a group — thrown
+  exception or `Result` `ok: false` — stops the run there without advancing
+  the watermark, so the whole group (including any leads in it that already
+  succeeded) is retried on the next run rather than being skipped. Also made
+  `saveState` return `Result<void>` (`state.ts`) instead of throwing on a
+  write failure, and `runSync` now checks it and aborts via `log.error`
+  instead of an unhandled rejection. Added a `YYYY-MM-DDTHH:mm:ss.sssZ`
+  format check to `state.ts`'s `isSyncState` guard, since a non-ISO string
+  like `"z"` previously passed the string-only guard and — because it sorts
+  after every real timestamp lexicographically — would have silently
+  excluded every lead with no error at all.
+  New tests in `run.test.ts`: two leads sharing `createdAt` with a crash
+  between them (neither is dropped, and the group is fully retried); a
+  `Result: ok:false` failure that must not advance the checkpoint past it and
+  must not be skipped on retry; a non-canonical `lastSyncedAt` value rejected
+  the same way a corrupted file is; a `saveState` write failure (missing
+  parent directory) handled as a controlled abort. Result: 29/29 tests green,
+  `check:rules` still **0**, `typecheck` clean.
+  Known, deliberately unaddressed limitation (narrower than before this
+  round): if one integration succeeds for a lead and a *different* integration
+  fails for that same lead, a retry of that lead's group still re-calls the
+  already-succeeded integration (no per-lead/per-integration delivery ledger
+  or idempotency key) — the lead itself is no longer skipped or lost, but it
+  can be redelivered to that one integration. Fixing that needs a
+  state-schema change beyond this bug's scope; flagged, not silently dropped.
 
 ### `/refactor`
 
@@ -146,6 +179,20 @@
   `core-untouched` both 0).
 - Scope: exactly the 3 expected files (module, test, one registry line);
   `app/src/core/**` untouched.
+- **Revised after code review**: `telegram-notify.ts` puts the bot token in
+  the request URL (Telegram's Bot API has no header-based auth), and
+  `core/http.ts` logs that URL verbatim on a failed attempt — `core/http.ts`
+  and `core/log.ts` are protected, so this can't be patched from here.
+  Checked whether it's actually exposed: `core/log.ts`'s existing `redact()`
+  already has a pattern for `bot\d{6,}:[A-Za-z0-9_-]{20,}`, which matches a
+  real Telegram token's shape. Added a test in `telegram-notify.test.ts`
+  using a realistically-shaped fake token, forcing a failed send, and
+  asserting the raw token never appears in anything passed to
+  `console.log`/`console.error` (only the redacted `bot<REDACTED>` form does)
+  — proving the existing core protection actually holds, rather than
+  assuming it. Also disabled `postJson` retries for Telegram (`retries: 0`):
+  a retry after Telegram already accepted the message but the client saw a
+  transport error would resend it, and there's no dedup key.
 
 ## Task E (bonus) — hook
 
@@ -182,3 +229,31 @@
   app/src/core/log.ts` (read-only) → allowed (exit 0); the existing `Edit`/
   `Write` checks on `app/src/core/log.ts` and a non-core file still behave
   exactly as before.
+- **Second review round — symlink bypass (CWE-59), fixed**: `Edit`/`Write`
+  checked the target path with plain `path.resolve()`, which doesn't resolve
+  symlinks — a symlink named e.g. `app/src/core-link` pointing at
+  `app/src/core` would let a write to `core-link/new.ts` pass the
+  `app/src/core/` prefix check under a different name. Fixed by
+  canonicalizing through `fs.realpathSync` on the target's closest *existing*
+  ancestor (the file itself may not exist yet, e.g. for `Write`) before
+  re-appending the remaining path and checking the prefix. Also added `ln`
+  and `symlinkSync`/`fs.symlink` to the `Bash` heuristic's write-shaped
+  patterns, to catch the symlink-creation step itself
+  (`ln -s app/src/core core-link`). Verified with a synthetic fixture (a real
+  junction/symlink created under a scratch directory, not in this repo):
+  writing to `<link>/new.ts` (nonexistent file, symlinked parent) resolved to
+  the real protected path and was blocked; `ln -s app/src/core ...` via
+  `Bash` was blocked; all prior cases (direct core edit, non-core edit, Bash
+  write/read, the commit-message false positive) re-verified unaffected.
+  Documented limitation, unchanged: the `Bash` text heuristic still can't
+  catch every indirect route (e.g. a path assembled from a shell variable, or
+  writing through a symlink created in an earlier, separate command) — it
+  raises the bar, it isn't a shell parser.
+- **Same round — own hook false-positived on a commit message**: the
+  mandatory `Co-Authored-By: ... <noreply@anthropic.com>` trailer's closing
+  `>` matched the original `>>?[^&]` redirection pattern (any `>` not
+  followed by `&`), blocking a real `git commit`. Tightened the pattern to
+  require whitespace/start-of-string before the `>` and a path-like token
+  after it, so it only matches redirection-shaped text, not an email's
+  closing bracket. Re-verified against both the commit message (no longer
+  matches) and a real `echo x >> app/src/core/log.ts` (still matches).
