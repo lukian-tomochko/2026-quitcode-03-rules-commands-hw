@@ -45,14 +45,22 @@ export async function runSync(
     const groupCreatedAt = pending[i]!.createdAt;
     let groupOk = true;
 
-    while (i < pending.length && pending[i]!.createdAt === groupCreatedAt) {
+    group: while (i < pending.length && pending[i]!.createdAt === groupCreatedAt) {
       const lead = pending[i]!;
       for (const integration of integrations) {
         const result = await integration.send(lead);
-        if (result.ok) delivered++;
-        else {
+        if (result.ok) {
+          delivered++;
+        } else {
+          // Stop the whole group right here: calling further integrations
+          // for this lead, or moving on to the next lead in the group, would
+          // do work that gets thrown away anyway once the group fails to
+          // checkpoint — and a later lead's success in the same group would
+          // otherwise be silently re-sent on retry, since nothing tracks it
+          // once the group as a whole is redone from the start.
           failed++;
           groupOk = false;
+          break group;
         }
       }
       i++;

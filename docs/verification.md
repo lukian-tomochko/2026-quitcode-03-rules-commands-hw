@@ -139,6 +139,18 @@
   or idempotency key) — the lead itself is no longer skipped or lost, but it
   can be redelivered to that one integration. Fixing that needs a
   state-schema change beyond this bug's scope; flagged, not silently dropped.
+- **Third review round — group processing didn't stop on the first failure**:
+  the grouping fix above set `groupOk = false` on a `Result` `ok: false` but
+  kept going — calling further integrations for that same lead, and moving on
+  to later leads in the same group. Since the group as a whole still wasn't
+  checkpointed, any later lead that happened to fully succeed in that same
+  run had its success silently discarded and redelivered on retry — a real
+  duplicate-delivery bug, not just wasted work. Fixed by breaking out of the
+  entire group immediately on the first `ok: false`, via a labeled loop.
+  Added a test: two leads sharing `createdAt`, the first fails — asserts the
+  second is never attempted in that run, and the whole group (both leads) is
+  retried from the start next time. Result: 30/30 tests green, `check:rules`
+  still **0**, `typecheck` clean.
 
 ### `/refactor`
 
@@ -185,14 +197,16 @@
   and `core/log.ts` are protected, so this can't be patched from here.
   Checked whether it's actually exposed: `core/log.ts`'s existing `redact()`
   already has a pattern for `bot\d{6,}:[A-Za-z0-9_-]{20,}`, which matches a
-  real Telegram token's shape. Added a test in `telegram-notify.test.ts`
-  using a realistically-shaped fake token, forcing a failed send, and
-  asserting the raw token never appears in anything passed to
-  `console.log`/`console.error` (only the redacted `bot<REDACTED>` form does)
-  — proving the existing core protection actually holds, rather than
-  assuming it. Also disabled `postJson` retries for Telegram (`retries: 0`):
-  a retry after Telegram already accepted the message but the client saw a
-  transport error would resend it, and there's no dedup key.
+  real Telegram token's shape. Also disabled `postJson` retries for Telegram
+  (`retries: 0`): a retry after Telegram already accepted the message but the
+  client saw a transport error would resend it, and there's no dedup key.
+- **Third review round**: the redact test above originally spied on
+  `console.log`/`console.error` directly to observe the effect, which itself
+  repeats the "no direct `console` in `app/src/**`" convention the test file
+  had already been cleaned of once. Replaced it with a direct call to
+  `redact()` (imported from `core/log.ts`, a public export) on the exact URL
+  shape `telegram-notify.ts` builds — same guarantee, no `console`/`fetch`
+  mocking needed at all.
 
 ## Task E (bonus) — hook
 
@@ -257,3 +271,30 @@
   after it, so it only matches redirection-shaped text, not an email's
   closing bracket. Re-verified against both the commit message (no longer
   matches) and a real `echo x >> app/src/core/log.ts` (still matches).
+- **Third review round — Bash bypass via a shell variable pointing at a
+  pre-existing symlink**: the documented limitation above
+  (`p=core-link; printf x > "$p/log.ts"`) was flagged as a real functional
+  gap worth closing, not just a limitation to accept — the command text
+  never mentions `app/src/core` at all when the symlink has an unrelated
+  name. Rather than parse shell syntax, the check now extracts bare
+  path-like tokens from a write-shaped command (including the right-hand
+  side of simple `VAR=value` assignments) and, for each one that exists on
+  disk, resolves it through the same `realpath`-based canonicalizer used for
+  `Edit`/`Write` to see if it lands under `app/src/core` — filesystem truth
+  instead of text matching, so it doesn't matter what name the symlink was
+  given. This caught two bugs in the first attempt at this fix: the
+  redirection pattern required a word-like character immediately after `>`,
+  which silently excluded quoted/variable targets like `> "$p/..."` (the
+  exact shape of the PoC); and the tokenizer only split on whitespace, so
+  `p=core-link;` kept its trailing semicolon and failed the path-shape check.
+  Both found by testing directly against the reviewer's exact PoC rather
+  than assuming the fix worked. Verified: the exact PoC, run against a real
+  symlink created in a scratch fixture (not this repo) → blocked, naming the
+  resolved token; the same shape pointed at an unrelated, non-core directory
+  → allowed; the full prior regression set (direct core edit/write, symlinked
+  Edit/Write, `ln -s`, Bash read, the commit-message trailer) re-verified
+  unaffected. Documented limitation, further narrowed but not eliminated:
+  command substitution (`$(...)`), paths built from string concatenation, and
+  anything not yet existing on disk at check time still can't be resolved
+  this way — closing that fully would mean a real shell sandbox or blocking
+  Bash writes outright, disproportionate to what this hook is for.

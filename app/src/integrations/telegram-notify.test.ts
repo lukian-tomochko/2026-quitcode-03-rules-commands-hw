@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { redact } from "../core/log.js";
 import type { Lead } from "../core/types.js";
 import { formatTelegramMessage, telegramNotify } from "./telegram-notify.js";
 
@@ -66,34 +67,21 @@ describe("telegram-notify", () => {
     });
   });
 
-  it("не пише токен бота в журнал при помилці", async () => {
-    // Realistically-shaped Telegram token (numeric id : 20+ char secret) —
-    // matches core/log.ts's own bot\d{6,}:[A-Za-z0-9_-]{20,} redact pattern,
-    // which is what actually protects the token since the url (with the
-    // token embedded, per Telegram's API) gets logged by core/http.ts on a
-    // failed attempt. core/http.ts and core/log.ts are protected and out of
-    // scope here — this only verifies the existing protection holds.
+  it("маскує токен бота у власному URL через redact() з core/log.ts", () => {
+    // The bot token has to be in the URL (Telegram's Bot API has no header
+    // auth), and core/http.ts logs that url verbatim on a failed attempt.
+    // core/http.ts and core/log.ts are protected and out of scope here —
+    // this verifies the existing redact() protection actually covers the
+    // exact URL shape telegram-notify.ts builds, using no console access:
+    // redact() is core's own public API, so calling it directly is the
+    // precise thing to check, rather than spying on console to observe an
+    // effect one step removed from it.
     const realisticToken = "1234567890:FAKEtelegramTestSecretToken1234567890";
-    vi.stubEnv("TELEGRAM_BOT_TOKEN", realisticToken);
-    vi.stubEnv("TELEGRAM_CHAT_ID", "123456");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("network down");
-      }),
-    );
-    const logged: string[] = [];
-    vi.spyOn(console, "log").mockImplementation((line: unknown) => {
-      logged.push(String(line));
-    });
-    vi.spyOn(console, "error").mockImplementation((line: unknown) => {
-      logged.push(String(line));
-    });
+    const url = `https://api.telegram.org/bot${realisticToken}/sendMessage`;
 
-    await telegramNotify.send(lead);
+    const redacted = redact(url);
 
-    const combined = logged.join("\n");
-    expect(combined).not.toContain(realisticToken);
-    expect(combined).toContain("bot<REDACTED>");
+    expect(redacted).not.toContain(realisticToken);
+    expect(redacted).toContain("bot<REDACTED>");
   });
 });

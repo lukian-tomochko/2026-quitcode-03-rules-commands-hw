@@ -138,6 +138,35 @@ describe("runSync", () => {
     expect(redelivered).toEqual(["ld_a", "ld_b"]);
   });
 
+  it("зупиняє групу одразу після Result ok:false, не обробляючи інших лідів тієї ж групи", async () => {
+    const statePath = join(dir, "sync-state.json");
+    const sameTs = "2026-09-09T10:00:00.000Z";
+    const grouped = [makeLead("ld_a", sameTs), makeLead("ld_b", sameTs)];
+    const attempted: string[] = [];
+    const flaky: Integration = {
+      name: "flaky",
+      requiredEnv: [],
+      send: async (lead) => {
+        attempted.push(lead.id);
+        return lead.id === "ld_a" ? { ok: false, error: "simulated failure" } : { ok: true, value: undefined };
+      },
+    };
+
+    const report = await runSync(grouped, [flaky], statePath);
+
+    // ld_b shares ld_a's createdAt but must never be attempted this run:
+    // delivering it here and then discarding that success (since the group
+    // as a whole isn't checkpointed) would just mean redelivering it next
+    // time anyway.
+    expect(attempted).toEqual(["ld_a"]);
+    expect(report).toEqual({ pending: 2, delivered: 0, failed: 1 });
+    expect(existsSync(statePath)).toBe(false);
+
+    const retried: string[] = [];
+    await runSync(grouped, [recordingIntegration(retried)], statePath);
+    expect(retried).toEqual(["ld_a", "ld_b"]);
+  });
+
   it("не просуває checkpoint повз лід, що не був доставлений, і не пропускає його наступного разу", async () => {
     const statePath = join(dir, "sync-state.json");
     const attempted: string[] = [];
