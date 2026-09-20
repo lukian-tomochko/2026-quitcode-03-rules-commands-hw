@@ -109,5 +109,20 @@
 
 ## Task E (bonus) — hook
 
-- Files: <e.g. `.claude/settings.json`, `.claude/hooks/protect-core.mjs`>
-- Attempt to edit `app/src/core/...` → hook's response (quote): <TODO>
+- Files: `.claude/settings.json` (`PreToolUse` hook, matcher `Edit|Write`,
+  running `node .claude/hooks/protect-core.mjs`), `.claude/hooks/protect-core.mjs`
+  (Node, reads the tool-call JSON from stdin, checks `tool_input.file_path`
+  against `app/src/core/`, writes to stderr and exits 2 to block).
+- Attempt: asked to add a comment at the start of `app/src/core/log.ts` (a
+  real `Edit` tool call in this session, not a simulation). Response (quote):
+  `PreToolUse:Edit hook error: [node .claude/hooks/protect-core.mjs]: Blocked:
+  "app/src/core/log.ts" is under app/src/core/**, the protected platform core
+  (see .claude/rules/do-not-touch.md). Core changes go through a separate PR
+  reviewed by the platform team. Describe what needs to change in core and
+  why, instead of editing it here.`
+- Verified `git status --short app/src/core/log.ts` showed no change and the
+  file content was untouched after the blocked attempt.
+- Also unit-tested the script directly (piping synthetic `PreToolUse` JSON on
+  stdin) with both `/`- and `\`-separated Windows paths: blocks
+  `app/src/core/log.ts` in both cases (exit 2), allows an unrelated file like
+  `app/src/integrations/slack-notify.ts` (exit 0).
