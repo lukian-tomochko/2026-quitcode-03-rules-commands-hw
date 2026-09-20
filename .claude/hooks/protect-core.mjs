@@ -9,34 +9,29 @@
 // name isn't literally "core" (e.g. app/src/core-link -> app/src/core)
 // can't be used to write into the protected zone under a different name.
 //
-// Bash has no structured file_path. This checks two things: whether the
-// command text literally mentions app/src/core, and — to catch a symlink
-// referenced by an unrelated name, e.g. `p=core-link; printf x >
-// "$p/log.ts"` — whether any bare path-like token in the command (including
-// the right-hand side of a `VAR=value` assignment) resolves, on the real
-// filesystem, into app/src/core (canonicalize() resolves the closest
-// *existing* ancestor, so a not-yet-existing target still resolves). Both
-// checks only run when the command also looks write-shaped. This is still a
-// heuristic, not a shell parser: it cannot evaluate command substitution
-// (`$(...)`) or a path built by string concatenation. It raises the bar; it
-// doesn't replace the rule or a human's judgment, and closing the gap
-// completely would mean either a real shell sandbox or blocking Bash writes
-// outright, both disproportionate to what this hook is for.
+// Bash: there is no reliable way to know a shell command's actual write
+// target from its text alone — after three rounds of trying (a literal
+// "app/src/core" mention, then resolving bare/variable-assigned tokens
+// through the real filesystem), the last remaining gap was a target built by
+// concatenating a variable with more literal text, e.g.
+// `d=app/src; printf x > "$d/core/blocked.ts"` — no fixed set of regexes can
+// bound every way a shell can build a string. Rather than add another one,
+// every write-shaped Bash command is blocked outright, regardless of what it
+// mentions or resolves to: file changes go through Edit or Write instead,
+// which report a structured, exact target this hook can always verify.
+// Closing this any other way would mean a real shell sandbox that actually
+// performs the expansion and checks the resulting target, which is out of
+// proportion to what this hook is for.
 import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 
 const PROTECTED_PREFIX = "app/src/core/";
-const PROTECTED_MENTION = /app[\\/]src[\\/]core([\\/]|\b)/;
 const WRITE_SHAPED = new RegExp(
   [
     // shell redirection: `>`/`>>`, excluding the specific shape of an email
     // closing an angle-bracket (e.g. `<noreply@anthropic.com>` in a
     // Co-Authored-By trailer) rather than requiring whitespace before it —
-    // bash accepts redirection with no space at all (`cmd>file`, `2>file`),
-    // so anchoring on whitespace missed exactly the no-space form. Not
-    // requiring anything about what follows `>` on purpose: a quoted or
-    // variable-based target (`> "$file"`, `> $OUT`) is exactly the shape
-    // this needs to catch, not just a bare word.
+    // bash accepts redirection with no space at all (`cmd>file`, `2>file`).
     "(?<!<[\\w.+-]+@[\\w.-]+)>>?(?!&)",
     "\\b(ln|mv|cp|rm|rmdir|touch|tee|dd|truncate|install|rsync|chmod|chown)\\b",
     "\\bsed\\b[^\\n]*-i\\b",
@@ -91,22 +86,6 @@ function isUnderProtected(absPath, canonicalCwd) {
   return relPath === PROTECTED_PREFIX.slice(0, -1) || relPath.startsWith(PROTECTED_PREFIX);
 }
 
-// Pulls out bare, literal path-like tokens from a shell command: plain words
-// (no shell metacharacters we can't safely evaluate, like `$` or `{}`) and
-// the right-hand side of simple `VAR=value` assignments. Deliberately
-// conservative — anything containing `$`, quotes we can't strip cleanly, or
-// command substitution is skipped rather than guessed at.
-function extractCandidatePaths(command) {
-  const candidates = new Set();
-  for (const raw of command.split(/[\s;&|]+/)) {
-    const token = raw.replace(/^['"]|['"]$/g, "");
-    const assignment = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/.exec(token);
-    const candidate = assignment ? assignment[1].replace(/^['"]|['"]$/g, "") : token;
-    if (/^[\w./~-]+$/.test(candidate)) candidates.add(candidate);
-  }
-  return candidates;
-}
-
 const raw = await readStdin();
 
 let payload;
@@ -121,23 +100,10 @@ const cwd = payload?.cwd ?? process.cwd();
 if (payload?.tool_name === "Bash") {
   const command = payload?.tool_input?.command;
   if (typeof command === "string" && WRITE_SHAPED.test(command)) {
-    if (PROTECTED_MENTION.test(command)) {
-      block(`this shell command appears to write into or symlink app/src/core/**`);
-    }
-    const canonicalCwd = canonicalize(resolve(cwd));
-    for (const candidate of extractCandidatePaths(command)) {
-      const abs = resolve(cwd, candidate);
-      // No existsSync guard: canonicalize() already walks up to the closest
-      // existing ancestor for a target that doesn't exist yet (the normal
-      // case for a file a write is about to create), so skipping
-      // nonexistent candidates here would just reopen that gap — e.g.
-      // `app/src/./core/blocked.ts` doesn't match PROTECTED_MENTION's exact
-      // text, blocked.ts doesn't exist yet, but it still resolves into
-      // app/src/core/** once canonicalized.
-      if (isUnderProtected(abs, canonicalCwd)) {
-        block(`this shell command references "${candidate}", which resolves into app/src/core/**`);
-      }
-    }
+    block(
+      `this shell command looks like it writes, renames, or symlinks a file, and its actual ` +
+        `target can't be verified from its text — use Edit or Write for file changes instead of Bash`,
+    );
   }
   process.exit(0);
 }

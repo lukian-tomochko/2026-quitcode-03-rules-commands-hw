@@ -335,3 +335,40 @@
   that still claimed shell-variable paths were undetected, which the third
   round had already fixed — CodeRabbit caught the contradiction between two
   of this file's own paragraphs.
+- **Fifth review round — variable value concatenated with more literal path
+  text, and a change of approach**: `d=app/src; printf x >
+  "$d/core/blocked.ts"` defeated the third round's candidate-resolution
+  fix — `extractCandidatePaths` correctly captured `app/src` as the
+  assignment's value (safe on its own, not under `app/src/core`), but the
+  actual redirection target is `$d` concatenated with the literal
+  `/core/blocked.ts`, which the extractor can't reconstruct: the token
+  `"$d/core/blocked.ts"` contains `$`, so it's skipped entirely as
+  unresolvable, and nothing else in the command catches it. This is the same
+  root problem as every previous Bash-heuristic gap, just in a new shape:
+  there is no fixed set of regexes that bounds every way a shell can build a
+  string, so stopping at "yet another pattern" would only produce a sixth
+  round with a different concatenation shape. Changed approach instead of
+  patching again, per the explicit recommendation: **every write-shaped
+  `Bash` command is now blocked outright**, regardless of what it mentions or
+  resolves to — `PROTECTED_MENTION` and the candidate-token resolution logic
+  were removed entirely. File changes go through `Edit`/`Write`, which report
+  a structured, exact `file_path` this hook can always verify (and already
+  does, including through symlinks, since the second round). The real cost
+  of this, stated plainly: a Bash command that writes/renames/symlinks
+  *anywhere*, not just under `app/src/core/**`, is now blocked too — e.g.
+  `mv`, `cp`, `sed -i`, or a redirect against an unrelated file must go
+  through `Edit`/`Write` instead. `Bash` remains fully usable for everything
+  that isn't write-shaped: reads, `git` commands outside the blocked subset,
+  `npm`/`node` invocations, `cd`, etc.
+  Verified: the exact new PoC → blocked; the third round's variable-symlink
+  PoC and the fourth round's no-space/`./`-normalization cases → all still
+  blocked (now unconditionally, without needing to resolve anything); the
+  previously-"benign" variable-based write case → now also blocked, which is
+  the intended, stricter behavior, not a regression; `npm test 2>&1` (fd
+  duplication) and a plain `cd app && npm test` → still allowed; direct
+  core `Edit`, non-core `Edit`, the symlinked `Edit`/`Write` case, `Bash`
+  reads, and the commit-message trailer → all re-verified unaffected. Each
+  case run as an isolated command after the sweep's own descriptive `echo`
+  text (containing the bare word "ln") tripped the new unconditional check
+  on the test harness itself — a small proof, in passing, of how literally
+  the policy now applies.
