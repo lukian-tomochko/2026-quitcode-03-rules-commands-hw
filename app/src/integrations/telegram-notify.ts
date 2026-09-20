@@ -31,7 +31,13 @@ export const telegramNotify: Integration = {
     if (!chatId.ok) return chatId;
 
     const url = `https://api.telegram.org/bot${botToken.value}/sendMessage`;
-    const response = await postJson(url, { chat_id: chatId.value, text: formatTelegramMessage(lead) });
+    // retries: 0 — a retry after Telegram already accepted the message but the
+    // client saw a transport error would resend it; there's no dedup key.
+    const response = await postJson(
+      url,
+      { chat_id: chatId.value, text: formatTelegramMessage(lead) },
+      { retries: 0 },
+    );
     if (!response.ok) {
       log.error(`telegram-notify: lead ${lead.id} not delivered: ${response.error}`);
       return response;

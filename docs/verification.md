@@ -66,6 +66,46 @@
   `sync/` only (not protected). Result: 19/19 tests green (18 baseline + 1
   new), `check:rules` unaffected by this change (still 8 at the time, all in
   `sheets-append.ts`/`state.ts`), `typecheck` clean.
+- **Revised after code review** — this is the iteration the walkthrough
+  expects ("корінну причину агент може знайти не з першого разу"), not a
+  silent correction: code review flagged a more precise root cause than the
+  once-per-batch checkpoint above. `loadState` (`state.ts:13-17`, old
+  version) caught any JSON-parse failure and **silently** fell back to
+  `INITIAL_STATE` (epoch). `saveState` wrote with a plain `writeFileSync`
+  (non-atomic), and `runSync` unconditionally re-saved whatever `loadState`
+  returned as its very first action. Put together: the `ENOSPC` write at
+  00:05/00:10 (`materials/error-log.txt`) could leave the state file
+  truncated/corrupted; the very next run's `loadState` would swallow that
+  silently and hand back epoch; and the unconditional resave would then
+  immediately bake that wrong epoch value back into the file before
+  processing anything — erasing the evidence and converting a small backlog
+  into a full-history resend, which is a better fit for the "392 similar
+  lines skipped" burst than a same-run scheduler timeout would be. `ENOSPC`
+  is the trigger either way; the root cause is this silent, unsurfaced
+  fallback plus the two amplifiers (non-atomic write, unconditional resave)
+  — a direct violation of the architecture brief's own convention #4 ("не
+  можна тихо підставити значення за замовчуванням"), and also the reason
+  `check:rules` already flagged `state.ts` for `json-via-parse`: it never
+  went through `parseJson`+guard.
+  Fix: `state.ts` now uses `parseJson`+guard (`loadState` returns
+  `Result<SyncState>`); a corrupted file is a hard error the caller must see,
+  not a default. `saveState` writes to a temp file and `renameSync`s over the
+  target (atomic). `run.ts` aborts loudly (`log.error`, zeroed report) if
+  `loadState` fails, and dropped the unconditional top-of-function resave.
+  Added `app/src/sync/run.test.ts`: a corrupted-state-file case asserting
+  `runSync` sends nothing, returns a zeroed report, leaves the corrupted file
+  untouched (no silent overwrite), and logs the abort. Also sorted `pending`
+  by `createdAt` ascending before the checkpoint loop, since `runSync` only
+  had a `readonly Lead[]` with no ordering guarantee — an out-of-order batch
+  could otherwise let a later lead's checkpoint skip an earlier, still-failed
+  one. Result: 24/24 tests green, `check:rules` now **0** total (fixing
+  `state.ts`'s `json-via-parse` as a side effect), `typecheck` clean.
+  Known, deliberately unaddressed limitation: if one integration succeeds for
+  a lead and a later one fails, a retry still re-calls the already-succeeded
+  integration (no per-lead/per-integration delivery ledger or idempotency
+  key). Fixing that needs a state-schema change beyond this bug's scope and
+  isn't part of the incident being reproduced here; flagged, not silently
+  dropped.
 
 ### `/refactor`
 
@@ -126,3 +166,19 @@
   stdin) with both `/`- and `\`-separated Windows paths: blocks
   `app/src/core/log.ts` in both cases (exit 2), allows an unrelated file like
   `app/src/integrations/slack-notify.ts` (exit 0).
+- **Revised after code review**: the matcher only covered `Edit|Write`, so a
+  session using `Bash` to write into `app/src/core/**` (e.g. `sed -i`, a
+  redirect, `mv`) would bypass the hook entirely, since `protect-core.mjs`
+  only read `tool_input.file_path`, which `Bash` doesn't have. Added `Bash`
+  to the matcher and a separate check path in the script: for `Bash` calls it
+  pattern-matches `tool_input.command` for a mention of `app/src/core`
+  combined with a write-shaped operator/command (`>`/`>>`, `mv`/`cp`/`rm`/
+  `sed -i`/`tee`/etc., `git checkout|apply|mv|restore|clean`,
+  `writeFileSync`/`appendFileSync`). This is a heuristic, not a shell parser
+  — documented in the script's own comment as raising the bar, not a
+  guarantee against every indirect way Bash could reach the path (e.g. a path
+  built from a variable). Verified directly: `echo 'x' >> app/src/core/log.ts`
+  via a synthetic `Bash` `PreToolUse` payload → blocked (exit 2); `cat
+  app/src/core/log.ts` (read-only) → allowed (exit 0); the existing `Edit`/
+  `Write` checks on `app/src/core/log.ts` and a non-core file still behave
+  exactly as before.

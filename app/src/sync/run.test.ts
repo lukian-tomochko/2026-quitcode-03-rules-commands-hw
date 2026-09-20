@@ -35,6 +35,7 @@ let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "lead-sync-"));
   vi.spyOn(console, "log").mockImplementation(() => {});
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -82,5 +83,21 @@ describe("runSync", () => {
 
     expect(redelivered).not.toContain("ld_0001");
     expect(redelivered).toEqual(["ld_0002", "ld_0003"]);
+  });
+
+  it("не скидає прогрес мовчки, якщо файл стану пошкоджений", async () => {
+    const statePath = join(dir, "sync-state.json");
+    writeFileSync(statePath, "{not valid json");
+
+    const sent: string[] = [];
+    const report = await runSync(leads, [recordingIntegration(sent)], statePath);
+
+    expect(report).toEqual({ pending: 0, delivered: 0, failed: 0 });
+    expect(sent).toEqual([]);
+    // File is left exactly as found — not silently overwritten with a fresh
+    // epoch state, which is what would cause the entire lead history to be
+    // treated as "pending" and resent.
+    expect(readFileSync(statePath, "utf8")).toBe("{not valid json");
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("sync: aborting"));
   });
 });

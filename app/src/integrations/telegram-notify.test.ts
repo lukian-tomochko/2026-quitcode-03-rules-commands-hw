@@ -38,7 +38,6 @@ describe("telegram-notify", () => {
   it("надсилає повідомлення в чат", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "fake-bot-token-0000");
     vi.stubEnv("TELEGRAM_CHAT_ID", "123456");
-    vi.spyOn(console, "log").mockImplementation(() => {});
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response('{"ok":true}', { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -56,7 +55,6 @@ describe("telegram-notify", () => {
   it("повертає помилку, якщо Telegram відповів ok: false", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "fake-bot-token-0000");
     vi.stubEnv("TELEGRAM_CHAT_ID", "123456");
-    vi.spyOn(console, "log").mockImplementation(() => {});
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response('{"ok":false,"description":"chat not found"}', { status: 200 })),

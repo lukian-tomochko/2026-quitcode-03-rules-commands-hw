@@ -14,10 +14,20 @@ export async function runSync(
   integrations: readonly Integration[],
   statePath: string,
 ): Promise<SyncReport> {
-  const state = loadState(statePath);
-  saveState(statePath, state); // створює файл стану при першому запуску
+  const loaded = loadState(statePath);
+  if (!loaded.ok) {
+    // A corrupted state file is an error to surface, not "no state yet" —
+    // continuing would silently reset lastSyncedAt to epoch and resend the
+    // entire lead history. Stop instead of guessing.
+    log.error(`sync: aborting, ${loaded.error}`);
+    return { pending: 0, delivered: 0, failed: 0 };
+  }
+  const state = loaded.value;
 
-  const pending = leads.filter((lead) => lead.createdAt > state.lastSyncedAt);
+  const pending = leads
+    .filter((lead) => lead.createdAt > state.lastSyncedAt)
+    .slice()
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   let delivered = 0;
   let failed = 0;
   let lastSyncedAt = state.lastSyncedAt;

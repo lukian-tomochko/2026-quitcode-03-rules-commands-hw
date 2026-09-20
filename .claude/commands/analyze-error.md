@@ -7,7 +7,8 @@ argument-hint: <path to a log file or stack trace>
 
 **Target:** $ARGUMENTS
 (If the line above has no concrete path, the target is the text right after
-the command name in the message. If there's none there either, ask and stop.)
+the command name in the message. If there's none there either, default to
+`materials/error-log.txt`.)
 
 ## Steps
 
