@@ -62,4 +62,25 @@ describe("runSync", () => {
 
     expect(sent).toEqual(["ld_0002", "ld_0003"]);
   });
+
+  it("зберігає прогрес по кожному ліду, щоб перерваний запуск не дублював уже надіслані", async () => {
+    const statePath = join(dir, "sync-state.json");
+    const crashing: Integration = {
+      name: "crashing",
+      requiredEnv: [],
+      send: async (lead) => {
+        if (lead.id === "ld_0002") throw new Error("simulated crash");
+        return { ok: true, value: undefined };
+      },
+    };
+
+    await expect(runSync(leads, [crashing], statePath)).rejects.toThrow("simulated crash");
+    expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual({ lastSyncedAt: "2026-09-09T10:00:00.000Z" });
+
+    const redelivered: string[] = [];
+    await runSync(leads, [recordingIntegration(redelivered)], statePath);
+
+    expect(redelivered).not.toContain("ld_0001");
+    expect(redelivered).toEqual(["ld_0002", "ld_0003"]);
+  });
 });
