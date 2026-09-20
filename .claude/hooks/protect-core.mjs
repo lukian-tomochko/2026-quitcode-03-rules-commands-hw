@@ -14,11 +14,12 @@
 // referenced by an unrelated name, e.g. `p=core-link; printf x >
 // "$p/log.ts"` — whether any bare path-like token in the command (including
 // the right-hand side of a `VAR=value` assignment) resolves, on the real
-// filesystem, into app/src/core. Both checks only run when the command also
-// looks write-shaped. This is still a heuristic, not a shell parser: it
-// cannot evaluate command substitution (`$(...)`), string-built paths, or
-// anything that doesn't exist on disk yet at check time. It raises the bar;
-// it doesn't replace the rule or a human's judgment, and closing the gap
+// filesystem, into app/src/core (canonicalize() resolves the closest
+// *existing* ancestor, so a not-yet-existing target still resolves). Both
+// checks only run when the command also looks write-shaped. This is still a
+// heuristic, not a shell parser: it cannot evaluate command substitution
+// (`$(...)`) or a path built by string concatenation. It raises the bar; it
+// doesn't replace the rule or a human's judgment, and closing the gap
 // completely would mean either a real shell sandbox or blocking Bash writes
 // outright, both disproportionate to what this hook is for.
 import { existsSync, realpathSync } from "node:fs";
@@ -28,14 +29,15 @@ const PROTECTED_PREFIX = "app/src/core/";
 const PROTECTED_MENTION = /app[\\/]src[\\/]core([\\/]|\b)/;
 const WRITE_SHAPED = new RegExp(
   [
-    // shell redirection: `>`/`>>` preceded by start-of-string/whitespace —
-    // not just any `>`, which would also match the closing bracket of an
-    // email like `<name@host>` (e.g. in a Co-Authored-By trailer; there the
-    // `>` always directly follows the address, never whitespace). Not
+    // shell redirection: `>`/`>>`, excluding the specific shape of an email
+    // closing an angle-bracket (e.g. `<noreply@anthropic.com>` in a
+    // Co-Authored-By trailer) rather than requiring whitespace before it —
+    // bash accepts redirection with no space at all (`cmd>file`, `2>file`),
+    // so anchoring on whitespace missed exactly the no-space form. Not
     // requiring anything about what follows `>` on purpose: a quoted or
     // variable-based target (`> "$file"`, `> $OUT`) is exactly the shape
     // this needs to catch, not just a bare word.
-    "(?:^|\\s)>>?(?!&)",
+    "(?<!<[\\w.+-]+@[\\w.-]+)>>?(?!&)",
     "\\b(ln|mv|cp|rm|rmdir|touch|tee|dd|truncate|install|rsync|chmod|chown)\\b",
     "\\bsed\\b[^\\n]*-i\\b",
     "\\bgit\\s+(checkout|apply|mv|restore|clean|rm)\\b",
@@ -125,7 +127,14 @@ if (payload?.tool_name === "Bash") {
     const canonicalCwd = canonicalize(resolve(cwd));
     for (const candidate of extractCandidatePaths(command)) {
       const abs = resolve(cwd, candidate);
-      if (existsSync(abs) && isUnderProtected(abs, canonicalCwd)) {
+      // No existsSync guard: canonicalize() already walks up to the closest
+      // existing ancestor for a target that doesn't exist yet (the normal
+      // case for a file a write is about to create), so skipping
+      // nonexistent candidates here would just reopen that gap — e.g.
+      // `app/src/./core/blocked.ts` doesn't match PROTECTED_MENTION's exact
+      // text, blocked.ts doesn't exist yet, but it still resolves into
+      // app/src/core/** once canonicalized.
+      if (isUnderProtected(abs, canonicalCwd)) {
         block(`this shell command references "${candidate}", which resolves into app/src/core/**`);
       }
     }

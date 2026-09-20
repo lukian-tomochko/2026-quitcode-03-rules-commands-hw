@@ -259,10 +259,9 @@
   the real protected path and was blocked; `ln -s app/src/core ...` via
   `Bash` was blocked; all prior cases (direct core edit, non-core edit, Bash
   write/read, the commit-message false positive) re-verified unaffected.
-  Documented limitation, unchanged: the `Bash` text heuristic still can't
-  catch every indirect route (e.g. a path assembled from a shell variable, or
-  writing through a symlink created in an earlier, separate command) — it
-  raises the bar, it isn't a shell parser.
+  (The write-through-a-variable-named-symlink gap noted here initially was
+  closed in the third review round below — see that entry for the current,
+  narrower limitation.)
 - **Same round — own hook false-positived on a commit message**: the
   mandatory `Co-Authored-By: ... <noreply@anthropic.com>` trailer's closing
   `>` matched the original `>>?[^&]` redirection pattern (any `>` not
@@ -298,3 +297,41 @@
   anything not yet existing on disk at check time still can't be resolved
   this way — closing that fully would mean a real shell sandbox or blocking
   Bash writes outright, disproportionate to what this hook is for.
+- **Fourth review round — two more real bypasses, both fixed, plus a stale
+  doc correction:**
+  1. The `Bash` redirection pattern required whitespace (or start-of-string)
+     immediately before `>`, to avoid matching the closing `>` of an email
+     like `<noreply@anthropic.com>`. But bash accepts redirection with **no**
+     space at all (`printf x>app/src/core/blocked.ts`) — and since the whole
+     `Bash` branch, including the plain `PROTECTED_MENTION` text check, was
+     gated behind that redirection pattern matching, a no-space redirect
+     skipped the check entirely even though the command *literally* contains
+     `app/src/core`. Fixed by excluding only the actual email shape via a
+     negative lookbehind (`(?<!<[\w.+-]+@[\w.-]+)>`) instead of requiring
+     whitespace, so `>` is recognized as redirection-shaped regardless of
+     what's on either side, while `<...@...>` still isn't.
+  2. The candidate-token check from the third round only resolved a token if
+     `existsSync` was already true, skipping the not-yet-existing target
+     that's the normal case for a file a write is about to create — e.g.
+     `printf x > app/src/./core/blocked.ts` doesn't match
+     `PROTECTED_MENTION`'s exact text (the `./` breaks it) and `blocked.ts`
+     doesn't exist yet, so it passed. Fixed by dropping the `existsSync`
+     guard entirely: `canonicalize()` already walks up to the closest
+     *existing* ancestor for exactly this case (that's what it was built for
+     in the second round, for `Edit`/`Write`) — the candidate check just
+     wasn't using that capability for every token.
+  Both were confirmed as real, working bypasses first (isolated fixture,
+  before any fix), not assumed from the report. Verified after fixing:
+  `printf x>app/src/core/blocked.ts` (no space) → blocked; `printf x >
+  app/src/./core/blocked.ts` (nonexistent target, `./` segment) → blocked,
+  naming the resolved candidate; `npm test 2>&1` (fd duplication, unrelated
+  file) → still allowed; the full prior regression set (direct core
+  edit/write, symlinked Edit/Write, `ln -s`, the variable-symlink PoC, a
+  benign variable-based write, Bash read, the commit-message trailer) →
+  re-verified unaffected. This also means the "anything not yet existing on
+  disk" limitation noted in the third-round entry above no longer applies —
+  left there as history of what was true at the time, not corrected in
+  place. Also removed a stale sentence from the second-round entry above
+  that still claimed shell-variable paths were undetected, which the third
+  round had already fixed — CodeRabbit caught the contradiction between two
+  of this file's own paragraphs.
